@@ -42,20 +42,30 @@ import imgaug  # https://github.com/aleju/imgaug (pip3 install imgaug)
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from pycocotools import mask as maskUtils
+import pycocotools
+from itertools import groupby
 
 import zipfile
 import urllib.request
 import shutil
 
-from mrcnn.config import Config
-from mrcnn import model as modellib, utils
+import matplotlib.pyplot as plt
+import cv2
+import numpy as np
+import json
+import glob
+
+
+# from utils import binary_mask_to_rle
 
 # Root directory of the project
-ROOT_DIR = os.path.abspath("../")  # CVHW3
+ROOT_DIR = os.path.abspath("./Mask_RCNN")  # CVHW3
 
 # Import Mask RCNN
 sys.path.append(ROOT_DIR)  # To find local version of the library
 
+from mrcnn.config import Config
+from mrcnn import model as modellib, utils
 # Path to trained weights file
 COCO_MODEL_PATH = os.path.join(ROOT_DIR, "mask_rcnn_coco.h5")
 
@@ -86,6 +96,11 @@ class CocoConfig(Config):
 
     # Number of classes (including background)
     NUM_CLASSES = 1 + 20  # Pascal has 20 classes
+    STEPS_PER_EPOCH = 100
+    VALIDATION_STEPS = 5
+    BACKBONE = "resnet50"
+    WEIGHT_DECAY = 0.001
+
 
 
 ############################################################
@@ -107,14 +122,19 @@ class CocoDataset(utils.Dataset):
         auto_download: Automatically download and unzip MS-COCO images and annotations
         """
 
-        if auto_download is True:
-            self.auto_download(dataset_dir, subset, year)
+        # if auto_download is True:
+        #     self.auto_download(dataset_dir, subset, year)
 
         coco = COCO("{}/pascal_train.json".format(dataset_dir))
-
+        # print(coco.cats)
+        # print(list(coco.imgs.keys())[:20])
+        # print(coco.imgs[736])
+        # print('YEEEEEEEEEEEEEEEEEEEEE')
+        # input()
         if subset == "minival" or subset == "valminusminival":
             subset = "val"
-        image_dir = "{}/{}{}".format(dataset_dir, subset, year)
+
+        image_dir = "{}/train_images".format(dataset_dir, subset)
 
         # Load all classes or a subset?
         if not class_ids:
@@ -397,6 +417,40 @@ def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=Non
 ############################################################
 #  Training
 ############################################################
+class_names = [
+    'BG',
+    'aeroplane',
+    'bicycle',
+    'bird',
+    'boat',
+    'bottle',
+    'bus',
+    'car',
+    'cat',
+    'chair',
+    'cow',
+    'diningtable',
+    'dog',
+    'horse',
+    'motorbike',
+    'person',
+    'pottedplant',
+    'sheep',
+    'sofa',
+    'train',
+    'tvmonitor'
+]
+
+def binary_mask_to_rle(binary_mask):
+    rle = {'counts': [], 'size': list(binary_mask.shape)}
+    counts = rle.get('counts')
+    for i, (value, elements) in enumerate(groupby(binary_mask.ravel(order='F'))):
+        if i == 0 and value == 1:
+            counts.append(0)
+        counts.append(len(list(elements)))
+    compressed_rle = maskUtils.frPyObjects(rle, rle.get('size')[0], rle.get('size')[1])
+    compressed_rle['counts'] = str(compressed_rle['counts'], encoding='utf-8')
+    return compressed_rle
 
 
 if __name__ == '__main__':
@@ -502,7 +556,7 @@ if __name__ == '__main__':
         print("Training network heads")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE,
-                    epochs=40,
+                    epochs=10,
                     layers='heads',
                     augmentation=augmentation)
 
@@ -511,7 +565,7 @@ if __name__ == '__main__':
         print("Fine tune Resnet stage 4 and up")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE,
-                    epochs=120,
+                    epochs=30,
                     layers='4+',
                     augmentation=augmentation)
 
@@ -520,7 +574,7 @@ if __name__ == '__main__':
         print("Fine tune all layers")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE / 10,
-                    epochs=160,
+                    epochs=40,
                     layers='all',
                     augmentation=augmentation)
 
@@ -532,6 +586,37 @@ if __name__ == '__main__':
         dataset_val.prepare()
         print("Running COCO evaluation on {} images.".format(args.limit))
         evaluate_coco(model, dataset_val, coco, "bbox", limit=int(args.limit))
+    elif args.command == "pascal_test":
+        cocoGt = COCO("{}/test.json".format(args.dataset))
+        coco_dt = []
+
+        for imgid in cocoGt.imgs:
+            image = cv2.imread("{}/test_images/".format(args.dataset) + cocoGt.loadImgs(ids=imgid)[0]['file_name'])[:,:,::-1] # load image
+            
+            r = model.detect([image], verbose=0)[0]
+            # print(cocoGt.loadImgs(ids=imgid)[0]['file_name'])
+            # for classid in r['class_ids']:
+            #     print(class_names[classid])  
+            # print('YEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE')
+            # exit(0)
+            
+            masks = r['masks']
+            categories = r['class_ids']
+            scores = r['scores']
+            
+            # masks, categories, scores = model.predict(image) # run inference of your model
+            n_instances = len(scores)
+            if len(categories) > 0: # If any objects are detected in this image
+                for i in range(n_instances): # Loop all instances
+                    # save information of the instance in a dictionary then append on coco_dt list
+                    pred = {}
+                    pred['image_id'] = imgid # this imgid must be same as the key of test.json
+                    pred['category_id'] = int(categories[i])
+                    pred['segmentation'] = binary_mask_to_rle(masks[:,:,i]) # save binary mask to RLE, e.g. 512x512 -> rle
+                    pred['score'] = float(scores[i])
+                    coco_dt.append(pred)
+        with open("submission.json", "w") as f:
+            json.dump(coco_dt, f)
     else:
         print("'{}' is not recognized. "
               "Use 'train' or 'evaluate'".format(args.command))
