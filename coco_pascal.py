@@ -6,25 +6,18 @@ Copyright (c) 2017 Matterport, Inc.
 Licensed under the MIT License (see LICENSE for details)
 Written by Waleed Abdulla
 
+Modified by Leonardo Wang 2020.12.04
 ------------------------------------------------------------
 
 Usage: import the module (see Jupyter notebooks for examples), or run from
        the command line as such:
 
-    # Train a new model starting from pre-trained COCO weights
-    python3 coco.py train --dataset=/path/to/coco/ --model=coco
-
-    # Train a new model starting from ImageNet weights. Also auto download COCO dataset
-    python3 coco.py train --dataset=/path/to/coco/ --model=imagenet --download=True
-
-    # Continue training a model that you had trained earlier
-    python3 coco.py train --dataset=/path/to/coco/ --model=/path/to/weights.h5
-
-    # Continue training the last model you trained
-    python3 coco.py train --dataset=/path/to/coco/ --model=last
-
-    # Run COCO evaluatoin on the last model you trained
-    python3 coco.py evaluate --dataset=/path/to/coco/ --model=last
+    # Train a new model starting from ImageNet weights.
+    python3 coco_pascal.py train --dataset=pascal_dataset/ --model=imagenet
+    
+    # test the last model and generate submission json
+    python3 pascal_coco.py pascal_test --dataset=pascal_dataset/ --model=last --limit=100
+    
 """
 
 import os
@@ -33,12 +26,6 @@ import time
 import numpy as np
 import imgaug  # https://github.com/aleju/imgaug (pip3 install imgaug)
 
-# Download and install the Python COCO tools from https://github.com/waleedka/coco
-# That's a fork from the original https://github.com/pdollar/coco with a bug
-# fix for Python 3.
-# I submitted a pull request https://github.com/cocodataset/cocoapi/pull/50
-# If the PR is merged then use the original repo.
-# Note: Edit PythonAPI/Makefile and replace "python" with "python3".
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from pycocotools import mask as maskUtils
@@ -56,10 +43,11 @@ import json
 import glob
 
 
-# from utils import binary_mask_to_rle
-
 # Root directory of the project
-ROOT_DIR = os.path.abspath("./Mask_RCNN")  # CVHW3
+# ROOT_DIR = os.path.abspath("./Mask_RCNN")
+
+# Run on colab
+ROOT_DIR = os.path.abspath("/content/drive/MyDrive/pascal/Mask_RCNN")
 
 # Import Mask RCNN
 sys.path.append(ROOT_DIR)  # To find local version of the library
@@ -72,7 +60,6 @@ COCO_MODEL_PATH = os.path.join(ROOT_DIR, "mask_rcnn_coco.h5")
 # Directory to save logs and model checkpoints, if not provided
 # through the command line argument --logs
 DEFAULT_LOGS_DIR = os.path.join(ROOT_DIR, "logs")
-DEFAULT_DATASET_YEAR = "2014"
 
 ############################################################
 #  Configurations
@@ -96,8 +83,8 @@ class CocoConfig(Config):
 
     # Number of classes (including background)
     NUM_CLASSES = 1 + 20  # Pascal has 20 classes
-    STEPS_PER_EPOCH = 100
-    VALIDATION_STEPS = 5
+    STEPS_PER_EPOCH = 200
+    VALIDATION_STEPS = 10
     BACKBONE = "resnet50"
     WEIGHT_DECAY = 0.001
 
@@ -108,7 +95,7 @@ class CocoConfig(Config):
 ############################################################
 
 class CocoDataset(utils.Dataset):
-    def load_coco(self, dataset_dir, subset, year=DEFAULT_DATASET_YEAR,
+    def load_coco(self, dataset_dir, subset, year=None,
                   class_ids=None, class_map=None, return_coco=False,
                   auto_download=False):
         """Load a subset of the COCO dataset.
@@ -122,19 +109,8 @@ class CocoDataset(utils.Dataset):
         auto_download: Automatically download and unzip MS-COCO images and annotations
         """
 
-        # if auto_download is True:
-        #     self.auto_download(dataset_dir, subset, year)
-
         coco = COCO("{}/pascal_train.json".format(dataset_dir))
-        # print(coco.cats)
-        # print(list(coco.imgs.keys())[:20])
-        # print(coco.imgs[736])
-        # print('YEEEEEEEEEEEEEEEEEEEEE')
-        # input()
-        if subset == "minival" or subset == "valminusminival":
-            subset = "val"
-
-        image_dir = "{}/train_images".format(dataset_dir, subset)
+        image_dir = "{}/train_images".format(dataset_dir)
 
         # Load all classes or a subset?
         if not class_ids:
@@ -167,78 +143,6 @@ class CocoDataset(utils.Dataset):
                     imgIds=[i], catIds=class_ids, iscrowd=None)))
         if return_coco:
             return coco
-
-    def auto_download(self, dataDir, dataType, dataYear):
-        """Download the COCO dataset/annotations if requested.
-        dataDir: The root directory of the COCO dataset.
-        dataType: What to load (train, val, minival, valminusminival)
-        dataYear: What dataset year to load (2014, 2017) as a string, not an integer
-        Note:
-            For 2014, use "train", "val", "minival", or "valminusminival"
-            For 2017, only "train" and "val" annotations are available
-        """
-
-        # Setup paths and file names
-        if dataType == "minival" or dataType == "valminusminival":
-            imgDir = "{}/{}{}".format(dataDir, "val", dataYear)
-            imgZipFile = "{}/{}{}.zip".format(dataDir, "val", dataYear)
-            imgURL = "http://images.cocodataset.org/zips/{}{}.zip".format("val", dataYear)
-        else:
-            imgDir = "{}/{}{}".format(dataDir, dataType, dataYear)
-            imgZipFile = "{}/{}{}.zip".format(dataDir, dataType, dataYear)
-            imgURL = "http://images.cocodataset.org/zips/{}{}.zip".format(dataType, dataYear)
-        # print("Image paths:"); print(imgDir); print(imgZipFile); print(imgURL)
-
-        # Create main folder if it doesn't exist yet
-        if not os.path.exists(dataDir):
-            os.makedirs(dataDir)
-
-        # Download images if not available locally
-        if not os.path.exists(imgDir):
-            os.makedirs(imgDir)
-            print("Downloading images to " + imgZipFile + " ...")
-            with urllib.request.urlopen(imgURL) as resp, open(imgZipFile, 'wb') as out:
-                shutil.copyfileobj(resp, out)
-            print("... done downloading.")
-            print("Unzipping " + imgZipFile)
-            with zipfile.ZipFile(imgZipFile, "r") as zip_ref:
-                zip_ref.extractall(dataDir)
-            print("... done unzipping")
-        print("Will use images in " + imgDir)
-
-        # Setup annotations data paths
-        annDir = "{}/annotations".format(dataDir)
-        if dataType == "minival":
-            annZipFile = "{}/instances_minival2014.json.zip".format(dataDir)
-            annFile = "{}/instances_minival2014.json".format(annDir)
-            annURL = "https://dl.dropboxusercontent.com/s/o43o90bna78omob/instances_minival2014.json.zip?dl=0"
-            unZipDir = annDir
-        elif dataType == "valminusminival":
-            annZipFile = "{}/instances_valminusminival2014.json.zip".format(dataDir)
-            annFile = "{}/instances_valminusminival2014.json".format(annDir)
-            annURL = "https://dl.dropboxusercontent.com/s/s3tw5zcg7395368/instances_valminusminival2014.json.zip?dl=0"
-            unZipDir = annDir
-        else:
-            annZipFile = "{}/annotations_trainval{}.zip".format(dataDir, dataYear)
-            annFile = "{}/instances_{}{}.json".format(annDir, dataType, dataYear)
-            annURL = "http://images.cocodataset.org/annotations/annotations_trainval{}.zip".format(dataYear)
-            unZipDir = dataDir
-        # print("Annotations paths:"); print(annDir); print(annFile); print(annZipFile); print(annURL)
-
-        # Download annotations if not available locally
-        if not os.path.exists(annDir):
-            os.makedirs(annDir)
-        if not os.path.exists(annFile):
-            if not os.path.exists(annZipFile):
-                print("Downloading zipped annotations to " + annZipFile + " ...")
-                with urllib.request.urlopen(annURL) as resp, open(annZipFile, 'wb') as out:
-                    shutil.copyfileobj(resp, out)
-                print("... done downloading.")
-            print("Unzipping " + annZipFile)
-            with zipfile.ZipFile(annZipFile, "r") as zip_ref:
-                zip_ref.extractall(unZipDir)
-            print("... done unzipping")
-        print("Will use annotations in " + annFile)
 
     def load_mask(self, image_id):
         """Load instance masks for the given image.
@@ -330,93 +234,11 @@ class CocoDataset(utils.Dataset):
         m = maskUtils.decode(rle)
         return m
 
-
-############################################################
-#  COCO Evaluation
-############################################################
-
-def build_coco_results(dataset, image_ids, rois, class_ids, scores, masks):
-    """Arrange resutls to match COCO specs in http://cocodataset.org/#format
-    """
-    # If no results, return an empty list
-    if rois is None:
-        return []
-
-    results = []
-    for image_id in image_ids:
-        # Loop through detections
-        for i in range(rois.shape[0]):
-            class_id = class_ids[i]
-            score = scores[i]
-            bbox = np.around(rois[i], 1)
-            mask = masks[:, :, i]
-
-            result = {
-                "image_id": image_id,
-                "category_id": dataset.get_source_class_id(class_id, "coco"),
-                "bbox": [bbox[1], bbox[0], bbox[3] - bbox[1], bbox[2] - bbox[0]],
-                "score": score,
-                "segmentation": maskUtils.encode(np.asfortranarray(mask))
-            }
-            results.append(result)
-    return results
-
-
-def evaluate_coco(model, dataset, coco, eval_type="bbox", limit=0, image_ids=None):
-    """Runs official COCO evaluation.
-    dataset: A Dataset object with valiadtion data
-    eval_type: "bbox" or "segm" for bounding box or segmentation evaluation
-    limit: if not 0, it's the number of images to use for evaluation
-    """
-    # Pick COCO images from the dataset
-    image_ids = image_ids or dataset.image_ids
-
-    # Limit to a subset
-    if limit:
-        image_ids = image_ids[:limit]
-
-    # Get corresponding COCO image IDs.
-    coco_image_ids = [dataset.image_info[id]["id"] for id in image_ids]
-
-    t_prediction = 0
-    t_start = time.time()
-
-    results = []
-    for i, image_id in enumerate(image_ids):
-        # Load image
-        image = dataset.load_image(image_id)
-
-        # Run detection
-        t = time.time()
-        r = model.detect([image], verbose=0)[0]
-        t_prediction += (time.time() - t)
-
-        # Convert results to COCO format
-        # Cast masks to uint8 because COCO tools errors out on bool
-        image_results = build_coco_results(dataset, coco_image_ids[i:i + 1],
-                                           r["rois"], r["class_ids"],
-                                           r["scores"],
-                                           r["masks"].astype(np.uint8))
-        results.extend(image_results)
-
-    # Load results. This modifies results with additional attributes.
-    coco_results = coco.loadRes(results)
-
-    # Evaluate
-    cocoEval = COCOeval(coco, coco_results, eval_type)
-    cocoEval.params.imgIds = coco_image_ids
-    cocoEval.evaluate()
-    cocoEval.accumulate()
-    cocoEval.summarize()
-
-    print("Prediction time: {}. Average {}/image".format(
-        t_prediction, t_prediction / len(image_ids)))
-    print("Total time: ", time.time() - t_start)
-
-
 ############################################################
 #  Training
 ############################################################
+
+# PASCAL VOC 20 CLASSES
 class_names = [
     'BG',
     'aeroplane',
@@ -466,7 +288,7 @@ if __name__ == '__main__':
                         metavar="/path/to/coco/",
                         help='Directory of the MS-COCO dataset')
     parser.add_argument('--year', required=False,
-                        default=DEFAULT_DATASET_YEAR,
+                        default=2020,
                         metavar="<year>",
                         help='Year of the MS-COCO dataset (2014 or 2017) (default=2014)')
     parser.add_argument('--model', required=True,
@@ -491,7 +313,6 @@ if __name__ == '__main__':
     print("Dataset: ", args.dataset)
     print("Year: ", args.year)
     print("Logs: ", args.logs)
-    print("Auto Download: ", args.download)
 
     # Configurations
     if args.command == "train":
@@ -535,15 +356,13 @@ if __name__ == '__main__':
         # Training dataset. Use the training set and 35K from the
         # validation set, as as in the Mask RCNN paper.
         dataset_train = CocoDataset()
-        dataset_train.load_coco(args.dataset, "train", year=args.year, auto_download=args.download)
-        if args.year in '2014':
-            dataset_train.load_coco(args.dataset, "valminusminival", year=args.year, auto_download=args.download)
+        dataset_train.load_coco(args.dataset, "train")
         dataset_train.prepare()
 
         # Validation dataset
         dataset_val = CocoDataset()
-        val_type = "val" if args.year in '2017' else "minival"
-        dataset_val.load_coco(args.dataset, val_type, year=args.year, auto_download=args.download)
+        val_type = "val"
+        dataset_val.load_coco(args.dataset, val_type)
         dataset_val.prepare()
 
         # Image Augmentation
@@ -556,7 +375,7 @@ if __name__ == '__main__':
         print("Training network heads")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE,
-                    epochs=10,
+                    epochs=40,
                     layers='heads',
                     augmentation=augmentation)
 
@@ -565,7 +384,7 @@ if __name__ == '__main__':
         print("Fine tune Resnet stage 4 and up")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE,
-                    epochs=30,
+                    epochs=120,
                     layers='4+',
                     augmentation=augmentation)
 
@@ -574,45 +393,27 @@ if __name__ == '__main__':
         print("Fine tune all layers")
         model.train(dataset_train, dataset_val,
                     learning_rate=config.LEARNING_RATE / 10,
-                    epochs=40,
+                    epochs=160,
                     layers='all',
                     augmentation=augmentation)
 
-    elif args.command == "evaluate":
-        # Validation dataset
-        dataset_val = CocoDataset()
-        val_type = "val" if args.year in '2017' else "minival"
-        coco = dataset_val.load_coco(args.dataset, val_type, year=args.year, return_coco=True, auto_download=args.download)
-        dataset_val.prepare()
-        print("Running COCO evaluation on {} images.".format(args.limit))
-        evaluate_coco(model, dataset_val, coco, "bbox", limit=int(args.limit))
     elif args.command == "pascal_test":
         cocoGt = COCO("{}/test.json".format(args.dataset))
         coco_dt = []
 
         for imgid in cocoGt.imgs:
             image = cv2.imread("{}/test_images/".format(args.dataset) + cocoGt.loadImgs(ids=imgid)[0]['file_name'])[:,:,::-1] # load image
-            
             r = model.detect([image], verbose=0)[0]
-            # print(cocoGt.loadImgs(ids=imgid)[0]['file_name'])
-            # for classid in r['class_ids']:
-            #     print(class_names[classid])  
-            # print('YEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE')
-            # exit(0)
-            
             masks = r['masks']
             categories = r['class_ids']
             scores = r['scores']
-            
-            # masks, categories, scores = model.predict(image) # run inference of your model
             n_instances = len(scores)
-            if len(categories) > 0: # If any objects are detected in this image
-                for i in range(n_instances): # Loop all instances
-                    # save information of the instance in a dictionary then append on coco_dt list
+            if len(categories) > 0:
+                for i in range(n_instances):
                     pred = {}
-                    pred['image_id'] = imgid # this imgid must be same as the key of test.json
+                    pred['image_id'] = imgid
                     pred['category_id'] = int(categories[i])
-                    pred['segmentation'] = binary_mask_to_rle(masks[:,:,i]) # save binary mask to RLE, e.g. 512x512 -> rle
+                    pred['segmentation'] = binary_mask_to_rle(masks[:,:,i])
                     pred['score'] = float(scores[i])
                     coco_dt.append(pred)
         with open("submission.json", "w") as f:
