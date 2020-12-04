@@ -9,22 +9,13 @@ Written by Waleed Abdulla
 Modified by Leonardo Wang 2020.12.04
 ------------------------------------------------------------
 
-Usage: import the module (see Jupyter notebooks for examples), or run from
-       the command line as such:
-
-    # Train a new model starting from ImageNet weights.
-    python3 coco_pascal.py train --dataset=pascal_dataset/ --model=imagenet
-    
-    # test the last model and generate submission json
-    python3 pascal_coco.py pascal_test --dataset=pascal_dataset/ --model=last --limit=100
-    
 """
 
 import os
 import sys
 import time
 import numpy as np
-import imgaug  # https://github.com/aleju/imgaug (pip3 install imgaug)
+import imgaug
 
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
@@ -42,6 +33,8 @@ import numpy as np
 import json
 import glob
 
+from mrcnn.config import Config
+from mrcnn import model as modellib, utils
 
 # Root directory of the project
 # ROOT_DIR = os.path.abspath("./Mask_RCNN")
@@ -52,8 +45,6 @@ ROOT_DIR = os.path.abspath("/content/drive/MyDrive/pascal/Mask_RCNN")
 # Import Mask RCNN
 sys.path.append(ROOT_DIR)  # To find local version of the library
 
-from mrcnn.config import Config
-from mrcnn import model as modellib, utils
 # Path to trained weights file
 COCO_MODEL_PATH = os.path.join(ROOT_DIR, "mask_rcnn_coco.h5")
 
@@ -89,7 +80,6 @@ class CocoConfig(Config):
     WEIGHT_DECAY = 0.001
 
 
-
 ############################################################
 #  Dataset
 ############################################################
@@ -101,12 +91,9 @@ class CocoDataset(utils.Dataset):
         """Load a subset of the COCO dataset.
         dataset_dir: The root directory of the COCO dataset.
         subset: What to load (train, val, minival, valminusminival)
-        year: What dataset year to load (2014, 2017) as a string, not an integer
         class_ids: If provided, only loads images that have the given classes.
         class_map: TODO: Not implemented yet. Supports maping classes from
             different datasets to the same class ID.
-        return_coco: If True, returns the COCO object.
-        auto_download: Automatically download and unzip MS-COCO images and annotations
         """
 
         coco = COCO("{}/pascal_train.json".format(dataset_dir))
@@ -182,8 +169,11 @@ class CocoDataset(utils.Dataset):
                     class_id *= -1
                     # For crowd masks, annToMask() sometimes returns a mask
                     # smaller than the given dimensions. If so, resize it.
-                    if m.shape[0] != image_info["height"] or m.shape[1] != image_info["width"]:
-                        m = np.ones([image_info["height"], image_info["width"]], dtype=bool)
+                    sh = (m.shape[0] != image_info["height"])
+                    sw = (m.shape[1] != image_info["width"])
+                    if (sh or sw):
+                        m = np.ones([image_info["height"],
+                                     image_info["width"]], dtype=bool)
                 instance_masks.append(m)
                 class_ids.append(class_id)
 
@@ -226,10 +216,6 @@ class CocoDataset(utils.Dataset):
         return rle
 
     def annToMask(self, ann, height, width):
-        """
-        Convert annotation which can be polygons, uncompressed RLE, or RLE to binary mask.
-        :return: binary mask (numpy 2D array)
-        """
         rle = self.annToRLE(ann, height, width)
         m = maskUtils.decode(rle)
         return m
@@ -237,6 +223,7 @@ class CocoDataset(utils.Dataset):
 ############################################################
 #  Training
 ############################################################
+
 
 # PASCAL VOC 20 CLASSES
 class_names = [
@@ -263,14 +250,17 @@ class_names = [
     'tvmonitor'
 ]
 
+
 def binary_mask_to_rle(binary_mask):
     rle = {'counts': [], 'size': list(binary_mask.shape)}
     counts = rle.get('counts')
-    for i, (value, elements) in enumerate(groupby(binary_mask.ravel(order='F'))):
+    groupby_mask = groupby(binary_mask.ravel(order='F'))
+    for i, (value, elements) in enumerate(groupby_mask):
         if i == 0 and value == 1:
             counts.append(0)
         counts.append(len(list(elements)))
-    compressed_rle = maskUtils.frPyObjects(rle, rle.get('size')[0], rle.get('size')[1])
+    compressed_rle = maskUtils.frPyObjects(
+        rle, rle.get('size')[0], rle.get('size')[1])
     compressed_rle['counts'] = str(compressed_rle['counts'], encoding='utf-8')
     return compressed_rle
 
@@ -290,7 +280,7 @@ if __name__ == '__main__':
     parser.add_argument('--year', required=False,
                         default=2020,
                         metavar="<year>",
-                        help='Year of the MS-COCO dataset (2014 or 2017) (default=2014)')
+                        help='Year')
     parser.add_argument('--model', required=True,
                         metavar="/path/to/weights.h5",
                         help="Path to weights .h5 file or 'coco'")
@@ -305,7 +295,7 @@ if __name__ == '__main__':
     parser.add_argument('--download', required=False,
                         default=False,
                         metavar="<True|False>",
-                        help='Automatically download and unzip MS-COCO files (default=False)',
+                        help='',
                         type=bool)
     args = parser.parse_args()
     print("Command: ", args.command)
@@ -402,7 +392,9 @@ if __name__ == '__main__':
         coco_dt = []
 
         for imgid in cocoGt.imgs:
-            image = cv2.imread("{}/test_images/".format(args.dataset) + cocoGt.loadImgs(ids=imgid)[0]['file_name'])[:,:,::-1] # load image
+            image = cv2.imread(
+                "{}/test_images/".format(args.dataset) +
+                cocoGt.loadImgs(ids=imgid)[0]['file_name'])[:, :, ::-1]
             r = model.detect([image], verbose=0)[0]
             masks = r['masks']
             categories = r['class_ids']
@@ -413,7 +405,7 @@ if __name__ == '__main__':
                     pred = {}
                     pred['image_id'] = imgid
                     pred['category_id'] = int(categories[i])
-                    pred['segmentation'] = binary_mask_to_rle(masks[:,:,i])
+                    pred['segmentation'] = binary_mask_to_rle(masks[:, :, i])
                     pred['score'] = float(scores[i])
                     coco_dt.append(pred)
         with open("submission.json", "w") as f:
